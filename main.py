@@ -281,10 +281,10 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
     # get Minecraft UUID of requested User and ensure an account exists with that name
     mc_uuid: str | None | Exception = await validate_minecraft_username(mc_name, command_member.name)
     if not mc_uuid:
-        await interaction.response.send_message('The supplied Username is not linked to a Minecraft account. Check spelling/letter case and try again.', ephemeral=True)
+        await interaction.response.send_message('The supplied Username is not linked to a Minecraft account. Check spelling/letter case and try again. No changes were made.', ephemeral=True)
         return
     elif isinstance(mc_uuid, Exception):
-        await interaction.response.send_message(f'An unknown error occurred checking if {mc_name} is linked to a Minecraft account. Please contact <@{BOT_DEVELOPER_ID}>')
+        await interaction.response.send_message(f'An unknown error occurred checking if {mc_name} is linked to a Minecraft account. Please contact <@{BOT_DEVELOPER_ID}>. No changes were made.')
         return
     
     ####################
@@ -292,10 +292,10 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
     # check if Discord ID is valid and in the server
     target_member: discord.Member | None | Exception = await validate_member_in_guild(interaction, discord_id, command_member.name)
     if not target_member:
-        await interaction.response.send_message('The supplied Discord ID is not valid. Ensure that the ID is correct, that the User is in the Server, and try again.', ephemeral=True)
+        await interaction.response.send_message('The supplied Discord ID is not valid. Ensure that the ID is correct, that the User is in the Server, and try again. No changes were made.', ephemeral=True)
         return
     elif isinstance(target_member, Exception):
-        await interaction.response.send_message(f'An unknown error occurred checking if {discord_id} is in this Server. Please contact <@{BOT_DEVELOPER_ID}>')
+        await interaction.response.send_message(f'An unknown error occurred checking if {discord_id} is in this Server. Please contact <@{BOT_DEVELOPER_ID}>. No changes were made.')
         return
     
     ####################
@@ -315,11 +315,11 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
                 conn.commit()
         else:
             log(f'{command_member.name} | Failed verification for {mc_name}, {discord_id}: Discord ID already exists in database')
-            await interaction.response.send_message(f'Minecraft account **{prev_verified[1]}** is already linked to Discord ID **{discord_id}**', ephemeral=True)
+            await interaction.response.send_message(f'Minecraft account **{prev_verified[1]}** is already linked to Discord ID **{discord_id}**. No changes were made.', ephemeral=True)
             return
     except Exception as e:
         log(f'{command_member.name} | An error occurred in VERIFY, DATABASE:\n{e}')
-        await interaction.response.send_message(f'An unknown error occurred creating a database entry for {mc_name} ( {discord_id} ). Please contact <@{BOT_DEVELOPER_ID}>')
+        await interaction.response.send_message(f'An unknown error occurred creating a database entry for {mc_name} ( {discord_id} ). Please contact <@{BOT_DEVELOPER_ID}>. No changes were made.')
         raise e
     log(f'{command_member.name} | Successfully created DATA ENTRY for: {mc_name}, {discord_id}')
     
@@ -361,9 +361,9 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
 @app_commands.describe(mc_name='Minecraft username (case sensitive). Do not provide Discord ID if using this.', discord_id='Discord ID. Do not provide Minecraft Username if using this.')
 async def command_unverify_user(interaction: discord.Interaction, mc_name: str = "", discord_id: str = '-1'):
     current_timestamp = int(datetime.now(timezone.utc).timestamp())
-
+    
     command_member = await validate_command_user(interaction, VERIFIER_ROLE_ID)
-    if not command_member: return # no need to send a response as validate_command_user handles all exit cases
+    if not command_member or not interaction.guild: return # no need to send a response as validate_command_user handles all exit cases
     
     ####################
     
@@ -383,8 +383,23 @@ async def command_unverify_user(interaction: discord.Interaction, mc_name: str =
         await interaction.response.send_message(f'The requested MC Username/Discord ID is not registered in the database. No changes were made.', ephemeral=True)
         return
     
+    mc_name = mc_name if mc_name != '' else target_user_entry[1]
+    discord_id = discord_id if discord_id != -1 else target_user_entry[3]
+    
     ####################
     
+    # get discord.Member object
+    target_member: discord.Member | None | Exception = await validate_member_in_guild(interaction, discord_id, command_member.name)
+    if not target_member:
+        await interaction.response.send_message('The supplied Discord ID is not valid. Ensure that the ID is correct, that the User is in the Server, and try again. No changes were made.', ephemeral=True)
+        return
+    elif isinstance(target_member, Exception):
+        await interaction.response.send_message(f'An unknown error occurred checking if {discord_id} is in this Server. Please contact <@{BOT_DEVELOPER_ID}>. No changes were made.')
+        return
+    
+    ####################
+    
+    # remove user's database entry
     try:
         with sqlite3.connect(DATABASE) as conn:
             cursor = conn.cursor()
@@ -399,8 +414,17 @@ async def command_unverify_user(interaction: discord.Interaction, mc_name: str =
     
     ####################
     
-    mc_name = mc_name if mc_name != '' else target_user_entry[1]
-    discord_id = discord_id if discord_id != -1 else target_user_entry[3]
+    # remove user "validated" role
+    log(f'{command_member.name} | Attempting to remove VERIFIED ROLE: {mc_name}, {discord_id}')
+    try:
+        role = interaction.guild.get_role(VERIFIED_ROLE_ID)
+        if not role: return # should never happen in properly configured server
+        await target_member.remove_roles(role, reason=f'{command_member.name} Un-verified {target_member.name} with Minecraft Account: {mc_name} ( {target_user_entry[2]} )')
+    except Exception as e:
+        raise e
+    log(f'{command_member.name} | Successfully removed VERIFIED ROLE: {mc_name}, {discord_id}')
+    
+    ####################
     
     lines = [
         f'**CSIS AGENT:** <@{command_member.id}>',
@@ -413,7 +437,7 @@ async def command_unverify_user(interaction: discord.Interaction, mc_name: str =
     embed = create_embed(lines, title=f'REMOVED VERIFIED USER', color=discord.Color.red())
     embed.set_footer(text=f'May the North be True, Strong, and Free')
     
-    await interaction.response.send_message(f'User successfully unverified', ephemeral=True)
+    await interaction.response.send_message(f'You have successfully unverified {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})', ephemeral=True)
     
     await asyncio.sleep(1)
     
@@ -424,7 +448,6 @@ async def command_unverify_user(interaction: discord.Interaction, mc_name: str =
 #    {[=== GENERAL ===]}
 #    \[===============]/
 
-
 # startup bot
 @bot.event
 async def on_ready():
@@ -433,12 +456,11 @@ async def on_ready():
     
     # sync commands
     log(f'Syncing command tree...')
-    synced = await bot.tree.sync(guild=GUILD)
+    await bot.tree.sync(guild=GUILD)
     log(f'Command tree synced!')
     
     log(f'Fetching channels...')
     LOG_CHANNEL = await bot.fetch_channel(LOG_CHANNEL_ID) # type: ignore
-    log(type(LOG_CHANNEL), LOG_CHANNEL)
     log(f'All channels fetched!')
     
     log(f'---------- BOT STARTUP COMPLETE ----------')
