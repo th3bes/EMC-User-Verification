@@ -21,6 +21,9 @@ GUILD = discord.Object(id=getenv("GUILD_ID", ''))
 VERIFIER_ROLE_ID = int(getenv("VERIFIER_ROLE_ID", -1))
 VERIFIED_ROLE_ID = int(getenv("VERIFIED_ROLE_ID", -1))
 
+LOG_CHANNEL_ID = int(getenv("LOG_CHANNEL_ID", -1))
+LOG_CHANNEL: discord.TextChannel
+
 intents = discord.Intents.all() # discord.Intents(105495251968)
 
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -168,6 +171,21 @@ def get_user_database_id(discord_id: int = 0, minecraft_username: str = '', mine
     return None
 
 
+#    {[=== DISCORD ===]}
+
+def create_embed(*content_lines, title: str = '', color: discord.Color = discord.Color.blue(), inline: bool = False):
+    if isinstance(content_lines[0], list):
+        content_lines = content_lines[0]
+    else:
+        content_lines = list(content_lines)
+    
+    embed = discord.Embed(title=title, color=color)
+    
+    for line in content_lines:
+        embed.add_field(name='', value=line, inline=inline)
+    
+    return embed
+
 #    {[=== DISCORD COMMAND HELPERS ===]}
 
 def get_guild_member_from_id(interaction: discord.Interaction, discord_id: int):
@@ -197,7 +215,7 @@ async def validate_command_user(interaction: discord.Interaction, needed_role_id
     await interaction.response.send_message('You do not have sufficient access to use this command.', ephemeral=True)
     return None
 
-async def validate_minecraft_username(mc_name: str, verifier_name: str):
+async def validate_minecraft_username(mc_name: str, verifier_name: str = 'SYSTEM'):
     log(f'{verifier_name} | Attempting to validate Minecraft USERNAME: {mc_name} ...')
     mc_uuid: str | None
     try:
@@ -213,7 +231,7 @@ async def validate_minecraft_username(mc_name: str, verifier_name: str):
     return mc_uuid
 
 # check if Discord ID is valid and in the server
-async def validate_member_in_guild(interaction: discord.Interaction, discord_id: int, verifier_name: str):
+async def validate_member_in_guild(interaction: discord.Interaction, discord_id: int, verifier_name: str = 'SYSTEM'):
     log(f'{verifier_name} | Attempting to validate Discord ID: {discord_id} ...')
     target_member: discord.Member | None
     try:
@@ -244,6 +262,8 @@ async def validate_member_in_guild(interaction: discord.Interaction, discord_id:
 @bot.tree.command(name='verify', description='Verify User and register to database for tracking', guild=GUILD)
 @app_commands.describe(mc_name='User\'s Minecraft username (case sensitive)', discord_id='User\'s Discord ID')
 async def command_verify_user(interaction: discord.Interaction, mc_name: str, discord_id: str):
+    current_timestamp = int(datetime.now(timezone.utc).timestamp())
+    
     command_member = await validate_command_user(interaction, VERIFIER_ROLE_ID)
     if not command_member or not interaction.guild: return # no need to send a response as validate_command_user handles all exit cases
     
@@ -291,7 +311,7 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
                 cursor.execute("""
                     INSERT INTO verified_users(minecraft_username, minecraft_uuid, discord_id, timestamp)
                     VALUES(?, ?, ?, ?)
-                """, (mc_name, mc_uuid, discord_id, int(datetime.now(timezone.utc).timestamp())))
+                """, (mc_name, mc_uuid, discord_id, current_timestamp))
                 conn.commit()
         else:
             log(f'{command_member.name} | Failed verification for {mc_name}, {discord_id}: Discord ID already exists in database')
@@ -317,16 +337,88 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
     
     ####################
     
+    lines = [
+        f'**CSIS AGENT:** <@{command_member.id}>',
+        f'**USER:** <@{discord_id}>',
+        f'__IGN__: `{mc_name}`',
+        f'__MC-UUID__: `{mc_uuid}`',
+        f'__DISCORD ID__: `{discord_id}`',
+        f'<t:{current_timestamp}:F>'
+    ]
+    embed = create_embed(lines, title=f'ADDED VERIFIED USER', color=discord.Color.green())
+    embed.set_footer(text=f'May the North be True, Strong, and Free')
+
+    await interaction.response.send_message(f'You have successfully verified {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})', ephemeral=True)
+    
+    await asyncio.sleep(1)
+    
+    await LOG_CHANNEL.send(embed=embed)
+    #await interaction.response.send_message(f'{command_member.name} has successfully verified {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})', ephemeral=True)
     log(f'{command_member.name} | VERIFICATION COMPLETE FOR {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})!')
-    await interaction.response.send_message(f'{command_member.name} has successfully verified {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})')
+    
 
+@bot.tree.command(name='unverify', description='Remove Verification for User and stop tracking. Provide EITHER Minecraft Username OR Discord ID.', guild=GUILD)
+@app_commands.describe(mc_name='Minecraft username (case sensitive). Do not provide Discord ID if using this.', discord_id='Discord ID. Do not provide Minecraft Username if using this.')
+async def command_unverify_user(interaction: discord.Interaction, mc_name: str = "", discord_id: str = '-1'):
+    current_timestamp = int(datetime.now(timezone.utc).timestamp())
 
-@bot.tree.command(name='unverify', description='Remove verification for registered User and stop tracking. Provide EITHER Minecraft Username OR Discord ID, you don\'t need both.')
-@app_commands.describe(mc_name='User\'s Minecraft username (case sensitive)', discord_id='User\'s Discord ID')
-async def command_unverify_user(interaction: discord.Interaction, mc_name: str = "", discord_id: int = 0):
     command_member = await validate_command_user(interaction, VERIFIER_ROLE_ID)
     if not command_member: return # no need to send a response as validate_command_user handles all exit cases
-
+    
+    ####################
+    
+    # cast discord_id into int because the command input cant handle large enough numbers
+    try:
+        discord_id = int(discord_id) # type: ignore
+        assert isinstance(discord_id, int)
+    except Exception as e:
+        raise e
+    
+    ####################
+    
+    # check if database entry exists for supplied mc_name or discord_id
+    target_user_entry: tuple | None = get_user_database_entry(discord_id=discord_id, minecraft_username=mc_name)
+    if not target_user_entry:
+        log(f'{command_member.name} | Requested user does not exist in database')
+        await interaction.response.send_message(f'The requested MC Username/Discord ID is not registered in the database. No changes were made.', ephemeral=True)
+        return
+    
+    ####################
+    
+    try:
+        with sqlite3.connect(DATABASE) as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                DELETE FROM verified_users WHERE id = ?
+            """, (target_user_entry[0],))
+            
+            conn.commit()
+    except Exception as e:
+        raise e
+    
+    ####################
+    
+    mc_name = mc_name if mc_name != '' else target_user_entry[1]
+    discord_id = discord_id if discord_id != -1 else target_user_entry[3]
+    
+    lines = [
+        f'**CSIS AGENT:** <@{command_member.id}>',
+        f'**USER:** <@{discord_id}>',
+        f'__IGN__: `{mc_name}`',
+        f'__MC-UUID__: `{target_user_entry[2]}`',
+        f'__DISCORD ID__: `{discord_id}`',
+        f'<t:{current_timestamp}:F>'
+    ]
+    embed = create_embed(lines, title=f'REMOVED VERIFIED USER', color=discord.Color.red())
+    embed.set_footer(text=f'May the North be True, Strong, and Free')
+    
+    await interaction.response.send_message(f'User successfully unverified', ephemeral=True)
+    
+    await asyncio.sleep(1)
+    
+    await LOG_CHANNEL.send(embed=embed)
+    log(f'{command_member.name} | UN-VERIFICATION COMPLETE FOR {'placeholder'} (IGN: {mc_name}, DISCORD ID: {discord_id})!')
 
 #    /[===============]\
 #    {[=== GENERAL ===]}
@@ -336,6 +428,7 @@ async def command_unverify_user(interaction: discord.Interaction, mc_name: str =
 # startup bot
 @bot.event
 async def on_ready():
+    global LOG_CHANNEL
     log(f'Bot initializing...')
     
     # sync commands
@@ -343,6 +436,10 @@ async def on_ready():
     synced = await bot.tree.sync(guild=GUILD)
     log(f'Command tree synced!')
     
+    log(f'Fetching channels...')
+    LOG_CHANNEL = await bot.fetch_channel(LOG_CHANNEL_ID) # type: ignore
+    log(type(LOG_CHANNEL), LOG_CHANNEL)
+    log(f'All channels fetched!')
     
     log(f'---------- BOT STARTUP COMPLETE ----------')
 
