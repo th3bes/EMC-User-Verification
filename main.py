@@ -29,6 +29,13 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 #    {[=== UTILITIES ===]}
 #    \[=================]/
 
+# logs content to console with timestamp in system's local time
+def log(*content):
+    now = datetime.now()
+    time = f'[{str(now.hour).rjust(2, '0')}:{str(now.minute).rjust(2, '0')}:{str(now.second).rjust(2, '0')}]'
+    print(f'{time} {' '.join(map(str, content))}')
+
+
 #    {[=== MOJANG ===]}
 
 # get player info from Mojang. Returns -1 if uuid is invalid, or None if some other error occurred
@@ -103,7 +110,7 @@ def request_emc_player_info(*usernames: str):
 #    {[=== SQLITE3 DATABASE HELPERS ===]}
 
 # gets the database entry of a user given any one of discord_id, minecraft_username, or minecraft_id
-def get_user_database_entry(discord_id: int = 0, minecraft_username: str = '', minecraft_uuid: str = '', database_id: int = 0):
+def get_user_database_entry(discord_id: int = 0, minecraft_username: str = '', minecraft_uuid: str = '', database_id: int = -1):
     """Get the users database entry of a user given any **ONE** of the following values:
         
     ### Args:
@@ -119,7 +126,7 @@ def get_user_database_entry(discord_id: int = 0, minecraft_username: str = '', m
             chosenIdentifier: str
             chosenValue: str | int
             
-            if discord_id != 0:
+            if discord_id != -1:
                 chosenIdentifier = 'discord_id'
                 chosenValue = discord_id
             elif minecraft_username != '':
@@ -155,7 +162,7 @@ def get_user_database_id(discord_id: int = 0, minecraft_username: str = '', mine
         **minecraft_id** *(str, optional)*.
         **database_id** *(str, optional)*.
     """
-    id = get_user_database_entry(discord_id, minecraft_username, minecraft_id, 0)
+    id = get_user_database_entry(discord_id, minecraft_username, minecraft_id)
     if id:
         return id[0]
     return None
@@ -190,37 +197,41 @@ async def validate_command_user(interaction: discord.Interaction, needed_role_id
     await interaction.response.send_message('You do not have sufficient access to use this command.', ephemeral=True)
     return None
 
-async def validate_minecraft_username(mc_name: str):
+async def validate_minecraft_username(mc_name: str, verifier_name: str):
+    log(f'{verifier_name} | Attempting to validate Minecraft USERNAME: {mc_name} ...')
     mc_uuid: str | None
     try:
         mc_uuid, _ = await request_mojang_player_info(mc_name)
         if not mc_uuid:
+            log(f'{verifier_name} | Failed validation for {mc_name}: Minecraft Username is not valid')
             return None
     except Exception as e:
+        log(f'{verifier_name} | AN UNKNOWN ERROR OCCURRED WHILE VALIDATING MINECRAFT USERNAME:\n{e}')
         return e
+
+    log(f'{verifier_name} | Successfully validated Minecraft USERNAME: {mc_name} ( {mc_uuid} )')
     return mc_uuid
 
-async def validate_member_in_guild(interaction: discord.Interaction, discord_id: int):
-    # check if Discord ID is valid and in the server
+# check if Discord ID is valid and in the server
+async def validate_member_in_guild(interaction: discord.Interaction, discord_id: int, verifier_name: str):
+    log(f'{verifier_name} | Attempting to validate Discord ID: {discord_id} ...')
     target_member: discord.Member | None
     try:
         target_member = get_guild_member_from_id(interaction, discord_id) # type: ignore
         if not target_member:
+            log(f'{verifier_name} | Failed validation for {discord_id}: Discord ID is not valid')
             return None
     except Exception as e:
+        log(f'{verifier_name} | AN UNKNOWN ERROR OCCURRED WHILE VALIDATING DISCORD ID:\n{e}')
         return e
+    
+    log(f'{verifier_name} | Successfully validated Discord ID: {discord_id} ( {target_member.name} )')
     return target_member
 
 #    {[=== AUTOCOMPLETE FUNCTIONS ===]}
 
 
 #    {[=== MISC. ===]}
-
-# logs content to console with timestamp in system's local time
-def log(*content):
-    now = datetime.now()
-    time = f'[{str(now.hour).rjust(2, '0')}:{str(now.minute).rjust(2, '0')}:{str(now.second).rjust(2, '0')}]'
-    print(f'{time} {' '.join(map(str, content))}')
 
 
 #    /[================]\
@@ -248,30 +259,24 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
     ####################
     
     # get Minecraft UUID of requested User and ensure an account exists with that name
-    log(f'{command_member.name} | Attempting to validate Minecraft USERNAME: {mc_name} ...')
-    mc_uuid: str | None | Exception = await validate_minecraft_username(mc_name)
+    mc_uuid: str | None | Exception = await validate_minecraft_username(mc_name, command_member.name)
     if not mc_uuid:
         await interaction.response.send_message('The supplied Username is not linked to a Minecraft account. Check spelling/letter case and try again.', ephemeral=True)
         return
     elif isinstance(mc_uuid, Exception):
-        log(f'{command_member.name} | An error occurred in VERIFY, MINECRAFT USERNAME:\n{mc_uuid}')
         await interaction.response.send_message(f'An unknown error occurred checking if {mc_name} is linked to a Minecraft account. Please contact <@{BOT_DEVELOPER_ID}>')
         return
-    log(f'{command_member.name} | Successfully validated Minecraft USERNAME: {mc_name} ( {mc_uuid} )')
     
     ####################
     
     # check if Discord ID is valid and in the server
-    log(f'{command_member.name} | Attempting to validate Discord ID: {discord_id} ...')
-    target_member: discord.Member | None | Exception = await validate_member_in_guild(interaction, discord_id)
+    target_member: discord.Member | None | Exception = await validate_member_in_guild(interaction, discord_id, command_member.name)
     if not target_member:
-        await interaction.response.send_message('The supplied Discord ID is not valid. Ensure that the ID is correct, the User is in the Server, and try again.', ephemeral=True)
+        await interaction.response.send_message('The supplied Discord ID is not valid. Ensure that the ID is correct, that the User is in the Server, and try again.', ephemeral=True)
         return
     elif isinstance(target_member, Exception):
-        log(f'{command_member.name} | An error occurred in VERIFY, DISCORD ID:\n{target_member}')
         await interaction.response.send_message(f'An unknown error occurred checking if {discord_id} is in this Server. Please contact <@{BOT_DEVELOPER_ID}>')
         return
-    log(f'{command_member.name} | Successfully validated Discord ID: {discord_id} ( {target_member.name} )')
     
     ####################
     
@@ -312,14 +317,16 @@ async def command_verify_user(interaction: discord.Interaction, mc_name: str, di
     
     ####################
     
+    log(f'{command_member.name} | VERIFICATION COMPLETE FOR {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})!')
     await interaction.response.send_message(f'{command_member.name} has successfully verified {target_member.name} (IGN: {mc_name}, DISCORD ID: {discord_id})')
 
 
 @bot.tree.command(name='unverify', description='Remove verification for registered User and stop tracking. Provide EITHER Minecraft Username OR Discord ID, you don\'t need both.')
 @app_commands.describe(mc_name='User\'s Minecraft username (case sensitive)', discord_id='User\'s Discord ID')
-async def command_unverify_user(interaction: discord.Interaction, mc_name: str = "", discord_id: int = -1):
+async def command_unverify_user(interaction: discord.Interaction, mc_name: str = "", discord_id: int = 0):
     command_member = await validate_command_user(interaction, VERIFIER_ROLE_ID)
     if not command_member: return # no need to send a response as validate_command_user handles all exit cases
+
 
 #    /[===============]\
 #    {[=== GENERAL ===]}
